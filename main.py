@@ -1,210 +1,156 @@
-import hashlib
-import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, date
 from typing import List, Optional
-from fastapi import FastAPI, Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from pydantic import BaseModel, EmailStr
-from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, ForeignKey
-from sqlalchemy.orm import declarative_base, sessionmaker, Session
-import jwt
+from uuid import UUID, uuid4
+from enum import Enum
+from pydantic import BaseModel, EmailStr, Field
+from fastapi import FastAPI, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
 
-# ----------------- CONFIGURATION & SECURITY -----------------
-DATABASE_URL = "sqlite:///./hrms.db"
-
-SECRET_KEY = "SUPER_SECRET_KEY_FOR_HRMS_AUTHENTICATION"
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60
-
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
-
-# ----------------- DATABASE SETUP -----------------
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-# ----------------- SQLALCHEMY MODELS -----------------
-class UserDB(Base):
-    __tablename__ = "users"
-    id = Column(Integer, primary_key=True, index=True)
-    username = Column(String, unique=True, index=True, nullable=False)
-    email = Column(String, unique=True, index=True, nullable=False)
-    hashed_password = Column(String, nullable=False)
-
-class EmployeeDB(Base):
-    __tablename__ = "employees"
-    id = Column(Integer, primary_key=True, index=True)
-    full_name = Column(String, nullable=False)
-    department = Column(String, nullable=False)
-    designation = Column(String, nullable=False)
-    salary = Column(Float, nullable=False)
-    is_active = Column(Boolean, default=True)
-    created_by_user = Column(Integer, ForeignKey("users.id"))
-
-Base.metadata.create_all(bind=engine)
-
-# ----------------- PYDANTIC SCHEMAS -----------------
-class UserRegister(BaseModel):
-    username: str
-    email: EmailStr
-    password: str
-
-class TokenResponse(BaseModel):
-    access_token: str
-    token_type: str
-    username: str
-
-class EmployeeCreate(BaseModel):
-    full_name: str
-    department: str
-    designation: str
-    salary: float
-
-class EmployeeUpdate(BaseModel):
-    full_name: Optional[str] = None
-    department: Optional[str] = None
-    designation: Optional[str] = None
-    salary: Optional[float] = None
-    is_active: Optional[bool] = None
-
-class EmployeeOut(BaseModel):
-    id: int
-    full_name: str
-    department: str
-    designation: str
-    salary: float
-    is_active: bool
-
-    class Config:
-        from_attributes = True
-
-# ----------------- PASSWORD SECURITY (NO PASSLIB DEPENDENCY) -----------------
-def hash_password(password: str) -> str:
-    salt = secrets.token_hex(16)
-    key = hashlib.sha256((salt + password).encode("utf-8")).hexdigest()
-    return f"{salt}:{key}"
-
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    try:
-        salt, stored_key = hashed_password.split(":")
-        computed_key = hashlib.sha256((salt + plain_password).encode("utf-8")).hexdigest()
-        return computed_key == stored_key
-    except Exception:
-        return False
-
-def create_access_token(data: dict) -> str:
-    to_encode = data.copy()
-    expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-
-def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> UserDB:
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials or token expired",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username: str = payload.get("sub")
-        if username is None:
-            raise credentials_exception
-    except jwt.PyJWTError:
-        raise credentials_exception
-
-    user = db.query(UserDB).filter(UserDB.username == username).first()
-    if user is None:
-        raise credentials_exception
-    return user
-
-# ----------------- FASTAPI INITIALIZATION -----------------
 app = FastAPI(
-    title="HRMS Authenticated CRUD Platform",
-    description="JWT-Secured Employee CRUD Engine",
+    title="HRMS Core API",
+    description="Backend API for Employee Directory, Attendance, and Leave Management",
     version="1.0.0"
 )
 
-# ----------------- 1. AUTHENTICATION ROUTES -----------------
-@app.post("/auth/register", status_code=status.HTTP_201_CREATED, tags=["Authentication"])
-def register(user_data: UserRegister, db: Session = Depends(get_db)):
-    existing = db.query(UserDB).filter(
-        (UserDB.username == user_data.username) | (UserDB.email == user_data.email)
-    ).first()
-    if existing:
-        raise HTTPException(status_code=400, detail="Username or email already exists")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-    new_user = UserDB(
-        username=user_data.username,
-        email=user_data.email,
-        hashed_password=hash_password(user_data.password)
+# --- Models ---
+class RoleEnum(str, Enum):
+    ADMIN = "ADMIN"
+    HR = "HR"
+    MANAGER = "MANAGER"
+    EMPLOYEE = "EMPLOYEE"
+
+class AttendanceStatus(str, Enum):
+    PRESENT = "PRESENT"
+    HALF_DAY = "HALF_DAY"
+    ABSENT = "ABSENT"
+
+class LeaveType(str, Enum):
+    CASUAL = "CASUAL"
+    SICK = "SICK"
+    EARNED = "EARNED"
+
+class EmployeeCreate(BaseModel):
+    first_name: str
+    last_name: str
+    email: EmailStr
+    department: str
+    designation: str
+    role: RoleEnum = RoleEnum.EMPLOYEE
+    base_salary: float = Field(..., gt=0)
+
+class EmployeeResponse(BaseModel):
+    id: UUID
+    employee_code: str
+    first_name: str
+    last_name: str
+    email: EmailStr
+    department: str
+    designation: str
+    role: RoleEnum
+    is_active: bool
+
+class AttendanceRecord(BaseModel):
+    user_id: UUID
+    work_date: date
+    check_in_time: datetime
+    check_out_time: Optional[datetime] = None
+    active_hours: float = 0.0
+    status: AttendanceStatus
+
+class LeaveRequestCreate(BaseModel):
+    user_id: UUID
+    leave_type: LeaveType
+    start_date: date
+    end_date: date
+    reason: str
+
+
+db_employees: dict[UUID, dict] = {}
+db_attendance: list[AttendanceRecord] = []
+db_leaves: list[dict] = []
+
+
+@app.get("/")
+def health_check():
+    return {"status": "online", "system": "HRMS Core Engine"}
+
+@app.post("/employees", response_model=EmployeeResponse, status_code=status.HTTP_201_CREATED)
+def create_employee(emp: EmployeeCreate):
+    emp_id = uuid4()
+    code = f"EMP-{len(db_employees) + 101}"
+    record = emp.model_dump()
+    record.update({"id": emp_id, "employee_code": code, "is_active": True})
+    db_employees[emp_id] = record
+    return record
+
+@app.get("/employees", response_model=List[EmployeeResponse])
+def list_employees():
+    return list(db_employees.values())
+
+@app.post("/attendance/check-in/{user_id}", response_model=AttendanceRecord)
+def check_in(user_id: UUID):
+    if user_id not in db_employees:
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+    today = date.today()
+    for record in db_attendance:
+        if record.user_id == user_id and record.work_date == today:
+            raise HTTPException(status_code=400, detail="Already checked in today")
+
+    new_record = AttendanceRecord(
+        user_id=user_id,
+        work_date=today,
+        check_in_time=datetime.now(),
+        status=AttendanceStatus.PRESENT
     )
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
-    return {"message": "User registered successfully", "username": new_user.username}
+    db_attendance.append(new_record)
+    return new_record
 
-@app.post("/auth/login", response_model=TokenResponse, tags=["Authentication"])
-def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    user = db.query(UserDB).filter(UserDB.username == form_data.username).first()
-    if not user or not verify_password(form_data.password, user.hashed_password):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
+@app.post("/attendance/check-out/{user_id}", response_model=AttendanceRecord)
+def check_out(user_id: UUID):
+    today = date.today()
+    record = next((r for r in db_attendance if r.user_id == user_id and r.work_date == today), None)
+    
+    if not record:
+        raise HTTPException(status_code=400, detail="No active check-in record found for today")
+    if record.check_out_time is not None:
+        raise HTTPException(status_code=400, detail="Already checked out today")
 
-    token = create_access_token(data={"sub": user.username})
-    return {"access_token": token, "token_type": "bearer", "username": user.username}
+    record.check_out_time = datetime.now()
+    duration_seconds = (record.check_out_time - record.check_in_time).total_seconds()
+    record.active_hours = round(duration_seconds / 3600.0, 2)
 
-# ----------------- 2. CRUD OPERATIONS (PROTECTED) -----------------
-@app.post("/employees/", response_model=EmployeeOut, status_code=status.HTTP_201_CREATED, tags=["Employees (CRUD)"])
-def create_employee(emp: EmployeeCreate, current_user: UserDB = Depends(get_current_user), db: Session = Depends(get_db)):
-    db_emp = EmployeeDB(
-        full_name=emp.full_name,
-        department=emp.department,
-        designation=emp.designation,
-        salary=emp.salary,
-        created_by_user=current_user.id
-    )
-    db.add(db_emp)
-    db.commit()
-    db.refresh(db_emp)
-    return db_emp
+    if record.active_hours >= 8.0:
+        record.status = AttendanceStatus.PRESENT
+    elif record.active_hours >= 4.5:
+        record.status = AttendanceStatus.HALF_DAY
+    else:
+        record.status = AttendanceStatus.ABSENT
 
-@app.get("/employees/", response_model=List[EmployeeOut], tags=["Employees (CRUD)"])
-def read_all_employees(current_user: UserDB = Depends(get_current_user), db: Session = Depends(get_db)):
-    return db.query(EmployeeDB).all()
+    return record
 
-@app.get("/employees/{emp_id}", response_model=EmployeeOut, tags=["Employees (CRUD)"])
-def read_employee_by_id(emp_id: int, current_user: UserDB = Depends(get_current_user), db: Session = Depends(get_db)):
-    emp = db.query(EmployeeDB).filter(EmployeeDB.id == emp_id).first()
-    if not emp:
+@app.post("/leaves/apply", status_code=status.HTTP_201_CREATED)
+def apply_leave(leave: LeaveRequestCreate):
+    if leave.user_id not in db_employees:
         raise HTTPException(status_code=404, detail="Employee not found")
-    return emp
+    if leave.start_date > leave.end_date:
+        raise HTTPException(status_code=400, detail="start_date cannot be after end_date")
 
-@app.put("/employees/{emp_id}", response_model=EmployeeOut, tags=["Employees (CRUD)"])
-def update_employee(emp_id: int, emp_update: EmployeeUpdate, current_user: UserDB = Depends(get_current_user), db: Session = Depends(get_db)):
-    emp = db.query(EmployeeDB).filter(EmployeeDB.id == emp_id).first()
-    if not emp:
-        raise HTTPException(status_code=404, detail="Employee not found")
-
-    update_fields = emp_update.model_dump(exclude_unset=True)
-    for key, value in update_fields.items():
-        setattr(emp, key, value)
-
-    db.commit()
-    db.refresh(emp)
-    return emp
-
-@app.delete("/employees/{emp_id}", status_code=status.HTTP_200_OK, tags=["Employees (CRUD)"])
-def delete_employee(emp_id: int, current_user: UserDB = Depends(get_current_user), db: Session = Depends(get_db)):
-    emp = db.query(EmployeeDB).filter(EmployeeDB.id == emp_id).first()
-    if not db_emp if False else not emp:
-        raise HTTPException(status_code=404, detail="Employee not found")
-
-    db.delete(emp)
-    db.commit()
-    return {"message": f"Employee {emp_id} successfully deleted"}
+    leave_id = uuid4()
+    days = (leave.end_date - leave.start_date).days + 1
+    leave_data = leave.model_dump()
+    leave_data.update({
+        "leave_id": leave_id,
+        "total_days": days,
+        "status": "PENDING"
+    })
+    db_leaves.append(leave_data)
+    return {"message": "Leave application submitted", "leave_id": leave_id, "days": days}
